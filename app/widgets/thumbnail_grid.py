@@ -1,6 +1,6 @@
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, Signal, QSize, QRect, QPoint
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QScrollArea, QLabel, QSizePolicy,
+    QWidget, QVBoxLayout, QScrollArea, QLabel, QSizePolicy, QLayout, QLayoutItem,
 )
 from PySide6.QtGui import QPixmap
 
@@ -8,15 +8,82 @@ from app.widgets.page_thumbnail import PageThumbnailWidget
 from app.core.thumbnail_worker import ThumbnailWorker
 
 
-class FlowLayout(QVBoxLayout):
-    """简单实现：用 QVBoxLayout 嵌套 QHBoxLayout 实现自动换行。"""
-    pass
+class FlowLayout(QLayout):
+    """根据可用宽度自动换行的流式布局。"""
+
+    def __init__(self, parent=None, margin=0, h_spacing=8, v_spacing=8):
+        super().__init__(parent)
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+        self._items: list[QLayoutItem] = []
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_height = 0
+
+        for item in self._items:
+            wid = item.widget()
+            space_x = self._h_space
+            space_y = self._v_space
+            next_x = x + item.sizeHint().width() + space_x
+            if next_x - space_x > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y = y + line_height + space_y
+                next_x = x + item.sizeHint().width() + space_x
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+            x = next_x
+            line_height = max(line_height, item.sizeHint().height())
+
+        return y + line_height - rect.y() + m.bottom()
 
 
 class ThumbnailGrid(QWidget):
     """可滚动的页面缩略图网格，支持异步加载。"""
 
-    COLUMN_COUNT = 4
+    selection_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,8 +98,8 @@ class ThumbnailGrid(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self._container = QWidget()
-        self._grid_layout = None
-        self._init_empty_grid()
+        self._flow_layout = FlowLayout(self._container, margin=4, h_spacing=8, v_spacing=8)
+        self._container.setLayout(self._flow_layout)
 
         self._scroll.setWidget(self._container)
         outer.addWidget(self._scroll)
@@ -41,14 +108,6 @@ class ThumbnailGrid(QWidget):
         self._status_label.setAlignment(Qt.AlignCenter)
         self._status_label.setStyleSheet("color: #666; font-size: 12px;")
         outer.addWidget(self._status_label)
-
-    def _init_empty_grid(self):
-        from PySide6.QtWidgets import QGridLayout
-        if self._grid_layout:
-            QWidget().setLayout(self._grid_layout)
-        self._grid_layout = QGridLayout(self._container)
-        self._grid_layout.setSpacing(8)
-        self._grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
     def load_pdf(self, pdf_path: str):
         """加载 PDF 并异步渲染缩略图。"""
@@ -78,8 +137,7 @@ class ThumbnailGrid(QWidget):
             thumb = PageThumbnailWidget(i, self)
             thumb.selection_changed.connect(self._on_selection_changed)
             self._thumbnails.append(thumb)
-            row, col = divmod(i, self.COLUMN_COUNT)
-            self._grid_layout.addWidget(thumb, row, col)
+            self._flow_layout.addWidget(thumb)
 
     @Slot(int, QPixmap)
     def _on_page_ready(self, page_index: int, pixmap: QPixmap):
@@ -96,7 +154,7 @@ class ThumbnailGrid(QWidget):
         self._status_label.setText(f"共 {count} 页")
 
     def _on_selection_changed(self, page_index: int, selected: bool):
-        pass  # 由 SplitTab 监听
+        self.selection_changed.emit()
 
     def clear(self):
         """停止渲染并清空所有缩略图。"""
@@ -106,7 +164,10 @@ class ThumbnailGrid(QWidget):
             self._worker = None
 
         self._thumbnails.clear()
-        self._init_empty_grid()
+        while self._flow_layout.count():
+            item = self._flow_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
         self._status_label.setText("")
 
     def get_selected_pages(self) -> list[int]:

@@ -27,6 +27,7 @@ class SplitTab(QWidget):
         # 左侧：缩略图网格
         self._grid = ThumbnailGrid()
         self._grid.setMinimumWidth(500)
+        self._grid.selection_changed.connect(self._on_grid_selection_changed)
         main_layout.addWidget(self._grid, stretch=1)
 
         # 右侧：控制面板
@@ -172,6 +173,10 @@ class SplitTab(QWidget):
         self._range_input.setText(indices_to_range_text(indices))
         self._updating_from_code = False
         self._update_status()
+
+    def _on_grid_selection_changed(self):
+        if not self._updating_from_code:
+            self._sync_range_input()
 
     def _update_status(self):
         selected = len(self._grid.get_selected_pages())
